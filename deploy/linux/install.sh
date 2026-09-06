@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Instala LIN Cloud Node Monitor como unidad de systemd.
 #
-#   sudo ./install.sh --api-uri http://datalake.linplatform.com:5007 \
-#                     --api-key <clave> \
+#   sudo ./install.sh [--api-key <clave>] \
+#                     [--api-uri http://datalake.linplatform.com:5007] \
 #                     [--docker-host unix:///var/run/docker.sock] \
 #                     [--source ./publish]
 #
-# El zip de la release trae este script junto a la carpeta publish/, así que
-# desde una máquina recién descomprimida basta con:
+# Todo es opcional: sin --api-uri el agente usa su valor por defecto
+# (http://datalake.linplatform.com:5007). El zip de la release trae este script
+# junto a la carpeta publish/, así que desde una máquina recién descomprimida basta:
 #
-#   sudo ./install.sh --api-uri <uri> --api-key <clave>
+#   sudo ./install.sh --api-key <clave>
 set -euo pipefail
 
 INSTALL_DIR=/opt/lin-node-monitor
@@ -40,11 +41,6 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-if [[ -z "$API_URI" ]]; then
-  echo "Falta --api-uri (por ejemplo http://datalake.linplatform.com:5007)" >&2
-  exit 1
-fi
-
 if [[ ! -x "$SOURCE_DIR/$BINARY" ]]; then
   echo "No se encontró el binario publicado en $SOURCE_DIR/$BINARY" >&2
   echo "Publícalo antes con:" >&2
@@ -70,8 +66,10 @@ fi
 umask 077
 {
   echo "# Generado por install.sh el $(date --iso-8601=seconds)"
-  echo "API_URI=$API_URI"
-  echo "API_KEY=$API_KEY"
+  # Solo se escriben las claves que se pasaron: las demás usan el valor por
+  # defecto del agente (API_URI -> http://datalake.linplatform.com:5007).
+  [[ -n "$API_URI" ]]           && echo "API_URI=$API_URI"
+  [[ -n "$API_KEY" ]]           && echo "API_KEY=$API_KEY"
   [[ -n "$DOCKER_HOST_VALUE" ]] && echo "DOCKER_HOST=$DOCKER_HOST_VALUE"
 } > "$ENV_FILE"
 chmod 0600 "$ENV_FILE"

@@ -50,8 +50,11 @@ Ver [`deploy/linux/README.md`](deploy/linux/README.md) para instalar el servicio
 
 ```bash
 unzip lin-node-monitor-linux-x64.zip -d lin-node-monitor && cd lin-node-monitor
-sudo ./install.sh --api-uri http://datalake.linplatform.com:5007 --api-key TU_CLAVE
+sudo ./install.sh --api-key TU_CLAVE
 ```
+
+`--api-uri` solo hace falta si la API no es la de por defecto
+(`http://datalake.linplatform.com:5007`).
 
 El host llama a `AddSystemd()`, así que la unidad usa `Type=notify` y systemd conoce
 el estado real del arranque; `Restart=always` lo relevanta si el proceso muere.
