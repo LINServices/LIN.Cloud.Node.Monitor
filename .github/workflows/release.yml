@@ -1,0 +1,117 @@
+name: Release del monitor
+
+# Se dispara al empujar un tag de versión (v1.2.3): el nombre del tag es el de la release.
+# También se puede lanzar a mano desde la pestaña Actions, indicando la versión.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Tag/versión de la release (p. ej. v1.2.3). Se crea si no existe."
+        required: true
+        type: string
+      prerelease:
+        description: "Marcar la release como prerelease."
+        required: false
+        type: boolean
+        default: true
+
+# El job de release necesita permiso de escritura para crear la GitHub Release.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Publicar ${{ matrix.rid }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Cada RID se empaqueta con los scripts de deploy/<os>/.
+          - rid: linux-x64
+            deploy_dir: linux
+          - rid: linux-arm64
+            deploy_dir: linux
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Instalar el SDK de .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      # El restore ha de ser específico del RID: si no, project.assets.json no trae
+      # el target net10.0/<rid> y publish falla con NETSDK1047.
+      - name: Restaurar
+        run: >
+          dotnet restore LIN.Cloud.Node.Monitor/LIN.Cloud.Node.Monitor.csproj
+          --runtime ${{ matrix.rid }}
+
+      - name: Preparar la carpeta de despliegue
+        run: |
+          set -euo pipefail
+          stage="lin-node-monitor-${{ matrix.rid }}"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          # Copia los scripts de instalación de deploy/<os>/, sin ningún publish/ previo.
+          rsync -a --exclude 'publish' "deploy/${{ matrix.deploy_dir }}/" "$stage/"
+
+      - name: Publicar (self-contained)
+        run: >
+          dotnet publish LIN.Cloud.Node.Monitor/LIN.Cloud.Node.Monitor.csproj
+          --configuration Release
+          --runtime ${{ matrix.rid }}
+          --self-contained true
+          --no-restore
+          --output "lin-node-monitor-${{ matrix.rid }}/publish"
+
+      - name: Marcar ejecutables
+        run: |
+          set -euo pipefail
+          stage="lin-node-monitor-${{ matrix.rid }}"
+          chmod +x "$stage/publish/LIN.Cloud.Node.Monitor"
+          chmod +x "$stage/install.sh" "$stage/uninstall.sh"
+
+      # El zip se hace desde dentro de la carpeta: al descomprimir quedan directamente
+      # los scripts de instalación y la carpeta publish/, sin un directorio intermedio.
+      - name: Empaquetar el zip
+        run: |
+          set -euo pipefail
+          stage="lin-node-monitor-${{ matrix.rid }}"
+          ( cd "$stage" && zip -r "../$stage.zip" . )
+
+      - name: Subir el artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: lin-node-monitor-${{ matrix.rid }}
+          path: lin-node-monitor-${{ matrix.rid }}.zip
+          if-no-files-found: error
+
+  release:
+    name: Publicar la GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Descargar los artefactos
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Crear la release y adjuntar los zips
+        uses: softprops/action-gh-release@v2
+        with:
+          # En push de tag lo toma de github.ref_name; en ejecución manual, del input.
+          tag_name: ${{ inputs.version || github.ref_name }}
+          name: ${{ inputs.version || github.ref_name }}
+          prerelease: ${{ inputs.prerelease || false }}
+          files: artifacts/*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true

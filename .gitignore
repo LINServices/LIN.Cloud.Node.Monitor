@@ -1,0 +1,21 @@
+# Build
+bin/
+obj/
+publish/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+
+# Empaquetado de la release
+lin-node-monitor-*/
+*.zip
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# SO
+Thumbs.db
+.DS_Store

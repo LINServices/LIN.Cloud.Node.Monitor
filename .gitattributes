@@ -1,0 +1,13 @@
+* text=auto
+
+# Scripts y unidades que se ejecutan en Linux: siempre LF, aunque se editen en Windows.
+*.sh            text eol=lf
+*.service       text eol=lf
+deploy/linux/** text eol=lf
+
+*.ps1           text eol=crlf
+
+# Binarios
+*.dll  binary
+*.zip  binary
+*.png  binary

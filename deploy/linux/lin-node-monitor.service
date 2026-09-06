@@ -1,0 +1,32 @@
+[Unit]
+Description=LIN Cloud Node Monitor
+Documentation=https://github.com/lin-cloud/LIN.Cloud.Node.Monitor
+# Necesita la red y el daemon de Docker; si Docker no está, systemd reintenta por Restart=always.
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+# El host llama a AddSystemd(): notifica su arranque y sus latidos a systemd.
+Type=notify
+ExecStart=/opt/lin-node-monitor/LIN.Cloud.Node.Monitor
+WorkingDirectory=/opt/lin-node-monitor
+
+# Configuración (API_URI, API_KEY y opcionalmente DOCKER_HOST) que escribe install.sh.
+EnvironmentFile=/etc/lin-node-monitor/lin-node-monitor.env
+Environment=DOTNET_ENVIRONMENT=Production
+
+# Si el proceso muere, systemd lo vuelve a levantar.
+Restart=always
+RestartSec=5
+
+# El monitor lee el socket de Docker (/var/run/docker.sock, propiedad de root:docker),
+# así que corre como root a propósito. Endurecerlo con ProtectSystem/PrivateTmp
+# rompería el acceso al socket, que es justo para lo que se instala.
+NoNewPrivileges=false
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lin-node-monitor
+
+[Install]
+WantedBy=multi-user.target
