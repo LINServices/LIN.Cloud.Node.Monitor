@@ -121,32 +121,27 @@ class DockerLogService(ApiService api, ILogger<DockerLogService> logger) : Backg
                 using var logStream = await LogStreamRetryPolicy.GetLogStreamAsync(
                     _docker, containerId, inspect.Config.Tty, since, ct);
 
-                var buffer      = new byte[8192];
-                var lineBuilder = new StringBuilder();
+                var buffer = new byte[8192];
+
+                // Un splitter por stream: el Decoder conserva los bytes de un carácter UTF-8
+                // partido entre lecturas, y stdout/stderr no se mezclan en la misma línea.
+                var stdout = new LineSplitter(buffer.Length);
+                var stderr = new LineSplitter(buffer.Length);
 
                 while (true)
                 {
                     var result = await logStream.ReadOutputAsync(buffer, 0, buffer.Length, ct);
                     if (result.EOF) break;
 
-                    var text  = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                    var start = 0;
+                    var splitter = result.Target == MultiplexedStream.TargetStream.StandardError
+                        ? stderr
+                        : stdout;
 
-                    for (var i = 0; i < text.Length; i++)
+                    foreach (var line in splitter.Push(buffer, result.Count))
                     {
-                        if (text[i] != '\n') continue;
-
-                        lineBuilder.Append(text, start, i - start);
-                        var line = lineBuilder.ToString().TrimEnd('\r');
-                        lineBuilder.Clear();
-                        start = i + 1;
-
                         if (!string.IsNullOrWhiteSpace(line))
                             await ProcessLineAsync(containerId, line, ct);
                     }
-
-                    if (start < text.Length)
-                        lineBuilder.Append(text, start, text.Length - start);
                 }
 
                 if (!ct.IsCancellationRequested)
@@ -156,9 +151,17 @@ class DockerLogService(ApiService api, ILogger<DockerLogService> logger) : Backg
                     await Task.Delay(StreamRetryDelay, ct);
                 }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 return;
+            }
+            catch (LogIngestException)
+            {
+                // No se avanzó el checkpoint: al reconectar se relee desde la última línea
+                // indexada (el id determinista evita duplicados en el servidor).
+                logger.LogWarning("Log ingestion failed for container {ContainerId}, reconnecting from checkpoint in {Delay}s",
+                    containerId, StreamRetryDelay / 1000);
+                await Task.Delay(StreamRetryDelay, ct);
             }
             catch (DockerContainerNotFoundException)
             {
@@ -188,12 +191,19 @@ class DockerLogService(ApiService api, ILogger<DockerLogService> logger) : Backg
         }
 
         var entry = new LogEntry(containerId, timestamp, message);
-        await api.IndexLogAsync(entry, ct);
+
+        // Solo se avanza el checkpoint si la línea quedó indexada; si no, se corta el stream
+        // para reconectar desde el último checkpoint en lugar de perder la línea.
+        if (!await api.IndexLogAsync(entry, ct))
+            throw new LogIngestException();
+
         await api.UpdateCheckpointAsync(containerId, timestamp, ct);
     }
 
     async Task<DateTime> ResolveSinceAsync(string containerId, CancellationToken ct)
     {
+        // Si la API falla aquí, la excepción se propaga y el stream se reintenta: usar
+        // "ahora - 5 s" ante un error de red saltaría los logs del periodo caído.
         var checkpoint = await api.GetCheckpointAsync(containerId, ct);
         return checkpoint.HasValue
             ? checkpoint.Value.AddMilliseconds(-CheckpointBackoffMs)
@@ -226,6 +236,45 @@ class DockerLogService(ApiService api, ILogger<DockerLogService> logger) : Backg
         if (spaceIndex <= 0) return false;
 
         message = line[(spaceIndex + 1)..];
-        return DateTime.TryParse(line[..spaceIndex], null, DateTimeStyles.RoundtripKind, out timestamp);
+        if (!DateTime.TryParse(line[..spaceIndex], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out timestamp))
+            return false;
+
+        timestamp = ApiService.ToUtc(timestamp);
+        return true;
+    }
+
+    sealed class LogIngestException() : Exception("Log line could not be indexed");
+
+    /// <summary>
+    /// Convierte bloques de bytes UTF-8 en líneas completas, manteniendo entre llamadas
+    /// tanto los bytes de un carácter partido como el resto de una línea sin terminar.
+    /// </summary>
+    sealed class LineSplitter(int maxBytes)
+    {
+        readonly Decoder       _decoder = Encoding.UTF8.GetDecoder();
+        readonly char[]        _chars   = new char[Encoding.UTF8.GetMaxCharCount(maxBytes)];
+        readonly StringBuilder _pending = new();
+
+        public List<string> Push(byte[] bytes, int count)
+        {
+            var charCount = _decoder.GetChars(bytes, 0, count, _chars, 0, flush: false);
+            var lines     = new List<string>();
+            var start     = 0;
+
+            for (var i = 0; i < charCount; i++)
+            {
+                if (_chars[i] != '\n') continue;
+
+                _pending.Append(_chars, start, i - start);
+                lines.Add(_pending.ToString().TrimEnd('\r'));
+                _pending.Clear();
+                start = i + 1;
+            }
+
+            if (start < charCount)
+                _pending.Append(_chars, start, charCount - start);
+
+            return lines;
+        }
     }
 }

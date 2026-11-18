@@ -12,7 +12,8 @@ static class LogStreamRetryPolicy
         DateTime since,
         CancellationToken ct)
     {
-        var sinceUnix = new DateTimeOffset(since).ToUnixTimeSeconds().ToString();
+        // new DateTimeOffset(DateTime) trata Kind = Unspecified como hora local: se normaliza antes.
+        var sinceUnix = new DateTimeOffset(ApiService.ToUtc(since)).ToUnixTimeSeconds().ToString();
 
         ContainerLogsParameters[] strategies =
         [

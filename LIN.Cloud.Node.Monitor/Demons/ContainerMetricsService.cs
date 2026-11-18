@@ -52,7 +52,9 @@ class ContainerMetricsService(ApiService api, ILogger<ContainerMetricsService> l
             try
             {
                 ContainerStatsResponse? snapshot = null;
-                var progress = new Progress<ContainerStatsResponse>(s => snapshot = s);
+                // Progress<T> invoca el callback de forma asíncrona (ThreadPool), así que al volver
+                // de GetContainerStatsAsync el snapshot podría no estar asignado todavía.
+                var progress = new SyncProgress<ContainerStatsResponse>(s => snapshot = s);
 
                 await _docker.Containers.GetContainerStatsAsync(
                     container.ID,
@@ -85,5 +87,11 @@ class ContainerMetricsService(ApiService api, ILogger<ContainerMetricsService> l
                     container.ID[..12], ex.Message);
             }
         }
+    }
+
+    /// <summary>IProgress que ejecuta el callback en el mismo hilo que llama a Report.</summary>
+    sealed class SyncProgress<T>(Action<T> handler) : IProgress<T>
+    {
+        public void Report(T value) => handler(value);
     }
 }
