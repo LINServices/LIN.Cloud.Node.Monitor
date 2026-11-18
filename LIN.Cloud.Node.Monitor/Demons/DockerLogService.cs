@@ -1,26 +1,27 @@
 using System.Collections.Concurrent;
 using System.Globalization;
-using System.Text;
 using Docker.DotNet;
 using Docker.DotNet.Models;
-using LIN.Cloud.Node.Monitor.Models;
+using LIN.Cloud.Node.Monitor.Common;
+using LIN.Cloud.Node.Monitor.Dtos;
+using LIN.Cloud.Node.Monitor.Exceptions;
+using LIN.Cloud.Node.Monitor.Extensions;
 using LIN.Cloud.Node.Monitor.Services;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace LIN.Cloud.Node.Monitor.Demons;
 
-class DockerLogService(ApiService api, ILogger<DockerLogService> logger) : BackgroundService
+internal class DockerLogService(IApiService api, IDockerClient docker, ILogger<DockerLogService> logger) : BackgroundService
 {
-    const int ContainerPollInterval = 10_000;
-    const int StreamRetryDelay     = 5_000;
-    const int InitialSinceOffset   = 5;
-    const int CheckpointBackoffMs  = 100;
+    private const int ContainerPollInterval = 10_000;
+    private const int StreamRetryDelay = 5_000;
+    private const int InitialSinceOffset = 5;
+    private const int CheckpointBackoffMs = 100;
+    private const int StopTimeout = 5_000;
+    private const int ReadBufferSize = 8192;
 
-    record struct ContainerLogTask(Task Task, CancellationTokenSource Cts);
-
-    readonly ConcurrentDictionary<string, ContainerLogTask> _running = new();
-    readonly DockerClient _docker = DockerClientFactory.Create();
+    private readonly ConcurrentDictionary<string, ContainerLogTask> _running = new();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -41,60 +42,63 @@ class DockerLogService(ApiService api, ILogger<DockerLogService> logger) : Backg
                 logger.LogError(ex, "Error in container polling loop");
             }
 
-            await Task.Delay(ContainerPollInterval, stoppingToken).ConfigureAwait(false);
+            await Task.Delay(ContainerPollInterval, stoppingToken);
         }
 
         await StopAllContainersAsync();
     }
 
-    async Task<HashSet<string>> ListContainerIdsAsync(CancellationToken ct)
+    private async Task<HashSet<string>> ListContainerIdsAsync(CancellationToken ct)
     {
-        var containers = await _docker.Containers.ListContainersAsync(
-            new ContainersListParameters { All = false }, ct);
+        var containers = await docker.Containers.ListContainersAsync(new ContainersListParameters { All = false }, ct);
         return containers.Select(c => c.ID).ToHashSet();
     }
 
-    async Task StartContainerLogTasksAsync(HashSet<string> ids, CancellationToken stoppingToken)
+    private async Task StartContainerLogTasksAsync(HashSet<string> ids, CancellationToken stoppingToken)
     {
-        foreach (var id in ids)
-        {
-            if (_running.ContainsKey(id)) continue;
-
-            var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-            var task = StreamLogsForContainerAsync(id, cts.Token);
-
-            if (!_running.TryAdd(id, new ContainerLogTask(task, cts)))
-            {
-                await cts.CancelAsync();
-                cts.Dispose();
-            }
-        }
+        foreach (var id in ids.Where(i => !_running.ContainsKey(i)))
+            await StartContainerLogTaskAsync(id, stoppingToken);
     }
 
-    async Task StopMissingContainersAsync(HashSet<string> currentIds)
+    private async Task StartContainerLogTaskAsync(string containerId, CancellationToken stoppingToken)
     {
-        var gone = _running.Keys.Where(id => !currentIds.Contains(id)).ToList();
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        var task = StreamLogsForContainerAsync(containerId, cts.Token);
+
+        if (_running.TryAdd(containerId, new ContainerLogTask(task, cts)))
+            return;
+
+        await cts.CancelAsync();
+        cts.Dispose();
+    }
+
+    private async Task StopMissingContainersAsync(HashSet<string> currentIds)
+    {
+        var gone = _running.Keys.Where(i => !currentIds.Contains(i)).ToList();
         foreach (var id in gone)
-        {
-            if (_running.TryRemove(id, out var t))
-                await CleanupContainerTaskAsync(id, t);
-        }
+            await StopContainerAsync(id);
     }
 
-    async Task StopAllContainersAsync()
+    private async Task StopContainerAsync(string containerId)
+    {
+        if (_running.TryRemove(containerId, out var logTask))
+            await CleanupContainerTaskAsync(containerId, logTask);
+    }
+
+    private async Task StopAllContainersAsync()
     {
         var all = _running.ToArray();
         _running.Clear();
-        foreach (var (id, t) in all)
-            await CleanupContainerTaskAsync(id, t);
+        foreach (var (id, logTask) in all)
+            await CleanupContainerTaskAsync(id, logTask);
     }
 
-    async Task CleanupContainerTaskAsync(string containerId, ContainerLogTask logTask)
+    private async Task CleanupContainerTaskAsync(string containerId, ContainerLogTask logTask)
     {
         try
         {
             await logTask.Cts.CancelAsync();
-            await Task.WhenAny(logTask.Task, Task.Delay(5_000));
+            await Task.WhenAny(logTask.Task, Task.Delay(StopTimeout));
         }
         catch (Exception ex)
         {
@@ -106,50 +110,15 @@ class DockerLogService(ApiService api, ILogger<DockerLogService> logger) : Backg
         }
     }
 
-    async Task StreamLogsForContainerAsync(string containerId, CancellationToken ct)
+    private async Task StreamLogsForContainerAsync(string containerId, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                var since   = await ResolveSinceAsync(containerId, ct);
-                var inspect = await InspectContainerAsync(containerId, ct);
-
-                if (inspect is null)
+                var containerExists = await StreamUntilEndAsync(containerId, ct);
+                if (!containerExists)
                     return;
-
-                using var logStream = await LogStreamRetryPolicy.GetLogStreamAsync(
-                    _docker, containerId, inspect.Config.Tty, since, ct);
-
-                var buffer = new byte[8192];
-
-                // Un splitter por stream: el Decoder conserva los bytes de un carácter UTF-8
-                // partido entre lecturas, y stdout/stderr no se mezclan en la misma línea.
-                var stdout = new LineSplitter(buffer.Length);
-                var stderr = new LineSplitter(buffer.Length);
-
-                while (true)
-                {
-                    var result = await logStream.ReadOutputAsync(buffer, 0, buffer.Length, ct);
-                    if (result.EOF) break;
-
-                    var splitter = result.Target == MultiplexedStream.TargetStream.StandardError
-                        ? stderr
-                        : stdout;
-
-                    foreach (var line in splitter.Push(buffer, result.Count))
-                    {
-                        if (!string.IsNullOrWhiteSpace(line))
-                            await ProcessLineAsync(containerId, line, ct);
-                    }
-                }
-
-                if (!ct.IsCancellationRequested)
-                {
-                    logger.LogDebug("Log stream ended for container {ContainerId}, retrying in {Delay}s",
-                        containerId, StreamRetryDelay / 1000);
-                    await Task.Delay(StreamRetryDelay, ct);
-                }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -159,8 +128,7 @@ class DockerLogService(ApiService api, ILogger<DockerLogService> logger) : Backg
             {
                 // No se avanzó el checkpoint: al reconectar se relee desde la última línea
                 // indexada (el id determinista evita duplicados en el servidor).
-                logger.LogWarning("Log ingestion failed for container {ContainerId}, reconnecting from checkpoint in {Delay}s",
-                    containerId, StreamRetryDelay / 1000);
+                logger.LogWarning("Log ingestion failed for container {ContainerId}, reconnecting from checkpoint in {Delay}s", containerId, StreamRetryDelay / 1000);
                 await Task.Delay(StreamRetryDelay, ct);
             }
             catch (DockerContainerNotFoundException)
@@ -170,8 +138,7 @@ class DockerLogService(ApiService api, ILogger<DockerLogService> logger) : Backg
             }
             catch (DockerApiException ex)
             {
-                logger.LogWarning(ex, "Docker API error for container {ContainerId}, retrying in {Delay}s",
-                    containerId, StreamRetryDelay / 1000);
+                logger.LogWarning(ex, "Docker API error for container {ContainerId}, retrying in {Delay}s", containerId, StreamRetryDelay / 1000);
                 await Task.Delay(StreamRetryDelay, ct);
             }
             catch (Exception ex)
@@ -182,12 +149,58 @@ class DockerLogService(ApiService api, ILogger<DockerLogService> logger) : Backg
         }
     }
 
-    async Task ProcessLineAsync(string containerId, string line, CancellationToken ct)
+    // Devuelve false si el contenedor ya no existe y el stream no debe reintentarse.
+    private async Task<bool> StreamUntilEndAsync(string containerId, CancellationToken ct)
+    {
+        var since = await ResolveSinceAsync(containerId, ct);
+        var inspect = await InspectContainerAsync(containerId, ct);
+
+        if (inspect is null)
+            return false;
+
+        using var logStream = await docker.GetLogStreamAsync(containerId, inspect.Config.Tty, since, ct);
+        await ReadLogStreamAsync(containerId, logStream, ct);
+
+        if (ct.IsCancellationRequested)
+            return true;
+
+        logger.LogDebug("Log stream ended for container {ContainerId}, retrying in {Delay}s", containerId, StreamRetryDelay / 1000);
+        await Task.Delay(StreamRetryDelay, ct);
+        return true;
+    }
+
+    private async Task ReadLogStreamAsync(string containerId, MultiplexedStream logStream, CancellationToken ct)
+    {
+        var buffer = new byte[ReadBufferSize];
+
+        // Un splitter por stream: el Decoder conserva los bytes de un carácter UTF-8
+        // partido entre lecturas, y stdout/stderr no se mezclan en la misma línea.
+        var stdout = new LineSplitter(buffer.Length);
+        var stderr = new LineSplitter(buffer.Length);
+
+        while (true)
+        {
+            var result = await logStream.ReadOutputAsync(buffer, 0, buffer.Length, ct);
+            if (result.EOF)
+                return;
+
+            var splitter = result.Target == MultiplexedStream.TargetStream.StandardError ? stderr : stdout;
+            await ProcessLinesAsync(containerId, splitter.Push(buffer, result.Count), ct);
+        }
+    }
+
+    private async Task ProcessLinesAsync(string containerId, List<string> lines, CancellationToken ct)
+    {
+        foreach (var line in lines.Where(l => !string.IsNullOrWhiteSpace(l)))
+            await ProcessLineAsync(containerId, line, ct);
+    }
+
+    private async Task ProcessLineAsync(string containerId, string line, CancellationToken ct)
     {
         if (!TryParseLogLine(line, out var timestamp, out var message))
         {
             timestamp = DateTime.UtcNow;
-            message   = line;
+            message = line;
         }
 
         var entry = new LogEntry(containerId, timestamp, message);
@@ -200,21 +213,19 @@ class DockerLogService(ApiService api, ILogger<DockerLogService> logger) : Backg
         await api.UpdateCheckpointAsync(containerId, timestamp, ct);
     }
 
-    async Task<DateTime> ResolveSinceAsync(string containerId, CancellationToken ct)
+    private async Task<DateTime> ResolveSinceAsync(string containerId, CancellationToken ct)
     {
         // Si la API falla aquí, la excepción se propaga y el stream se reintenta: usar
         // "ahora - 5 s" ante un error de red saltaría los logs del periodo caído.
         var checkpoint = await api.GetCheckpointAsync(containerId, ct);
-        return checkpoint.HasValue
-            ? checkpoint.Value.AddMilliseconds(-CheckpointBackoffMs)
-            : DateTime.UtcNow.AddSeconds(-InitialSinceOffset);
+        return checkpoint.HasValue ? checkpoint.Value.AddMilliseconds(-CheckpointBackoffMs) : DateTime.UtcNow.AddSeconds(-InitialSinceOffset);
     }
 
-    async Task<ContainerInspectResponse?> InspectContainerAsync(string containerId, CancellationToken ct)
+    private async Task<ContainerInspectResponse?> InspectContainerAsync(string containerId, CancellationToken ct)
     {
         try
         {
-            return await _docker.Containers.InspectContainerAsync(containerId, ct);
+            return await docker.Containers.InspectContainerAsync(containerId, ct);
         }
         catch (DockerContainerNotFoundException)
         {
@@ -227,54 +238,20 @@ class DockerLogService(ApiService api, ILogger<DockerLogService> logger) : Backg
         }
     }
 
-    static bool TryParseLogLine(string line, out DateTime timestamp, out string message)
+    private static bool TryParseLogLine(string line, out DateTime timestamp, out string message)
     {
         timestamp = default;
-        message   = string.Empty;
+        message = string.Empty;
 
         var spaceIndex = line.IndexOf(' ');
-        if (spaceIndex <= 0) return false;
+        if (spaceIndex <= 0)
+            return false;
 
         message = line[(spaceIndex + 1)..];
         if (!DateTime.TryParse(line[..spaceIndex], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out timestamp))
             return false;
 
-        timestamp = ApiService.ToUtc(timestamp);
+        timestamp = timestamp.ToUtc();
         return true;
-    }
-
-    sealed class LogIngestException() : Exception("Log line could not be indexed");
-
-    /// <summary>
-    /// Convierte bloques de bytes UTF-8 en líneas completas, manteniendo entre llamadas
-    /// tanto los bytes de un carácter partido como el resto de una línea sin terminar.
-    /// </summary>
-    sealed class LineSplitter(int maxBytes)
-    {
-        readonly Decoder       _decoder = Encoding.UTF8.GetDecoder();
-        readonly char[]        _chars   = new char[Encoding.UTF8.GetMaxCharCount(maxBytes)];
-        readonly StringBuilder _pending = new();
-
-        public List<string> Push(byte[] bytes, int count)
-        {
-            var charCount = _decoder.GetChars(bytes, 0, count, _chars, 0, flush: false);
-            var lines     = new List<string>();
-            var start     = 0;
-
-            for (var i = 0; i < charCount; i++)
-            {
-                if (_chars[i] != '\n') continue;
-
-                _pending.Append(_chars, start, i - start);
-                lines.Add(_pending.ToString().TrimEnd('\r'));
-                _pending.Clear();
-                start = i + 1;
-            }
-
-            if (start < charCount)
-                _pending.Append(_chars, start, charCount - start);
-
-            return lines;
-        }
     }
 }
