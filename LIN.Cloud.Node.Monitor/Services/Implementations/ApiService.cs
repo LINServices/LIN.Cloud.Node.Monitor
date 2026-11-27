@@ -17,7 +17,7 @@ internal class ApiService(HttpClient http, ILogger<ApiService> logger) : IApiSer
     {
         try
         {
-            using var response = await http.PostAsJsonAsync("/api/metrics", entry, JsonOptions, ct);
+            using var response = await http.PostAsJsonAsync("api/metrics", entry, JsonOptions, ct);
             response.EnsureSuccessStatusCode();
         }
         catch (Exception ex)
@@ -33,7 +33,7 @@ internal class ApiService(HttpClient http, ILogger<ApiService> logger) : IApiSer
 
         try
         {
-            using var response = await http.PostAsJsonAsync("/api/logs", payload, JsonOptions, ct);
+            using var response = await http.PostAsJsonAsync("api/logs", payload, JsonOptions, ct);
             response.EnsureSuccessStatusCode();
             return true;
         }
@@ -54,7 +54,7 @@ internal class ApiService(HttpClient http, ILogger<ApiService> logger) : IApiSer
 
         try
         {
-            using var response = await http.PostAsJsonAsync($"/api/checkpoints/{containerId}", payload, JsonOptions, ct);
+            using var response = await http.PostAsJsonAsync($"api/checkpoints/{containerId}", payload, JsonOptions, ct);
             response.EnsureSuccessStatusCode();
         }
         catch (Exception ex)
@@ -65,7 +65,7 @@ internal class ApiService(HttpClient http, ILogger<ApiService> logger) : IApiSer
 
     public async Task<DateTime?> GetCheckpointAsync(string containerId, CancellationToken ct)
     {
-        using var response = await http.GetAsync($"/api/checkpoints/{containerId}", ct);
+        using var response = await http.GetAsync($"api/checkpoints/{containerId}", ct);
         if (response.StatusCode == HttpStatusCode.NotFound)
             return null;
 

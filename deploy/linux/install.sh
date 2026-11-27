@@ -2,12 +2,12 @@
 # Instala LIN Cloud Node Monitor como unidad de systemd.
 #
 #   sudo ./install.sh [--api-key <clave>] \
-#                     [--api-uri http://datalake.linplatform.com:5007] \
+#                     [--api-uri https://api.linplatform.com/airplane/telemetry/] \
 #                     [--docker-host unix:///var/run/docker.sock] \
 #                     [--source ./publish]
 #
 # Todo es opcional: sin --api-uri el agente usa su valor por defecto
-# (http://datalake.linplatform.com:5007). El zip de la release trae este script
+# (https://api.linplatform.com/airplane/telemetry/). El zip de la release trae este script
 # junto a la carpeta publish/, así que desde una máquina recién descomprimida basta:
 #
 #   sudo ./install.sh --api-key <clave>
@@ -67,7 +67,7 @@ umask 077
 {
   echo "# Generado por install.sh el $(date --iso-8601=seconds)"
   # Solo se escriben las claves que se pasaron: las demás usan el valor por
-  # defecto del agente (API_URI -> http://datalake.linplatform.com:5007).
+  # defecto del agente (API_URI -> https://api.linplatform.com/airplane/telemetry/).
   [[ -n "$API_URI" ]]           && echo "API_URI=$API_URI"
   [[ -n "$API_KEY" ]]           && echo "API_KEY=$API_KEY"
   [[ -n "$DOCKER_HOST_VALUE" ]] && echo "DOCKER_HOST=$DOCKER_HOST_VALUE"

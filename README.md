@@ -15,7 +15,7 @@ Por variables de entorno (las escribe `install.sh` en el `EnvironmentFile` de sy
 
 | Variable      | Por defecto                               | Descripción                          |
 |---------------|-------------------------------------------|--------------------------------------|
-| `API_URI`     | `http://datalake.linplatform.com:5007`    | base de la API de ingestión          |
+| `API_URI`     | `https://api.linplatform.com/airplane/telemetry/` | base de la API de ingestión (las rutas `api/...` se añaden a ella) |
 | `API_KEY`     | —                                         | se manda como cabecera `X-Api-Key`   |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock`             | socket/URL del daemon de Docker      |
 
@@ -46,15 +46,30 @@ Se dispara de dos formas:
 Cada zip, al descomprimirse, deja `install.sh` + `publish/` sin carpeta intermedia.
 Ver [`deploy/linux/README.md`](deploy/linux/README.md) para instalar el servicio.
 
-## Instalar como servicio (resumen)
+## Agente en Linux
+
+Instalar o actualizar a la última release (descarga el zip de tu arquitectura, limpia la
+instalación anterior y pide la API key por teclado):
 
 ```bash
-unzip lin-node-monitor-linux-x64.zip -d lin-node-monitor && cd lin-node-monitor
-sudo ./install.sh --api-key TU_CLAVE
+bash <(curl -fsSL https://github.com/LINServices/LIN.Cloud.Node.Monitor/releases/latest/download/reinstall.sh)
 ```
 
-`--api-uri` solo hace falta si la API no es la de por defecto
-(`http://datalake.linplatform.com:5007`).
+Desinstalar:
+
+```bash
+bash <(curl -fsSL https://github.com/LINServices/LIN.Cloud.Node.Monitor/releases/latest/download/uninstall.sh)
+```
+
+`reinstall.sh` ya limpia la instalación anterior por su cuenta; ejecutar `uninstall.sh`
+antes es opcional. Variables de `reinstall.sh`: `VERSION` (por defecto `latest`; p. ej.
+`v1.0.0` para fijar una), `API_KEY` (si se define, no la pregunta), `API_URI` y
+`DOCKER_HOST_VALUE`. Sin `API_URI` se usa la base por defecto
+(`https://api.linplatform.com/airplane/telemetry/`).
+
+Cada release publica `uninstall.sh` y `reinstall.sh` (de `deploy/linux/`) como assets, junto
+a `lin-node-monitor-linux-x64.zip` y `lin-node-monitor-linux-arm64.zip`. Para instalar a
+mano desde el zip, ver [`deploy/linux/README.md`](deploy/linux/README.md).
 
 El host llama a `AddSystemd()`, así que la unidad usa `Type=notify` y systemd conoce
 el estado real del arranque; `Restart=always` lo relevanta si el proceso muere.

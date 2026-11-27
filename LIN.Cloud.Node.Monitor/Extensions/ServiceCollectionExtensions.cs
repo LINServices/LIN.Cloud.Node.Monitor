@@ -9,9 +9,17 @@ namespace LIN.Cloud.Node.Monitor.Extensions;
 
 public static class ServiceCollectionExtensions
 {
+    private const string DefaultApiUri = "https://api.linplatform.com/airplane/telemetry/";
+
     public static IServiceCollection AddApi(this IServiceCollection services)
     {
-        var apiUri = Environment.GetEnvironmentVariable("API_URI") ?? "https://api.linplatform.com/airplane/telemetry/";
+        var apiUri = Environment.GetEnvironmentVariable("API_URI");
+        if (string.IsNullOrWhiteSpace(apiUri))
+            apiUri = DefaultApiUri;
+
+        // Las rutas del ApiService son relativas: la base debe acabar en "/" para conservar su prefijo.
+        if (!apiUri.EndsWith('/'))
+            apiUri += "/";
         var apiKey = Environment.GetEnvironmentVariable("API_KEY");
 
         services.AddHttpClient<IApiService, ApiService>(client =>

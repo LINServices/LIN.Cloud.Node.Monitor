@@ -37,7 +37,7 @@ X-Api-Key: <secret>
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `API_URI` | `http://localhost:5000` | Base URL of **this** API |
+| `API_URI` | `https://api.linplatform.com/airplane/telemetry/` | Base URL of **this** API (routes below are appended to it) |
 | `API_KEY` | *(empty)* | Value sent in `X-Api-Key` |
 
 ---
